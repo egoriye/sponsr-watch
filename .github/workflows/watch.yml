@@ -1,0 +1,29 @@
+name: Место у Мараховского
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Прислать тестовое сообщение в Telegram'
+        type: boolean
+        default: true
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Проверить места
+        run: python3 check.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SPAM_COUNT: ${{ vars.SPAM_COUNT }}
+          TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.test }}
