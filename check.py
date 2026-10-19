@@ -1,4 +1,3 @@
-"""Следит за свободными местами на уровне подписки Sponsr и шлёт уведомления в Telegram."""
 import json
 import os
 import re
