@@ -10,6 +10,10 @@ on:
         type: boolean
         default: true
 
+permissions:
+  actions: read
+  contents: read
+
 concurrency:
   group: watch
   cancel-in-progress: false
@@ -20,10 +24,24 @@ jobs:
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
+
+      - name: Как закончился прошлый запуск
+        id: prev
+        continue-on-error: true
+        run: |
+          c=$(gh run list --workflow watch.yml --limit 5 --json databaseId,conclusion \
+              --jq '[.[] | select(.databaseId != ${{ github.run_id }} and .conclusion != "")][0].conclusion // ""')
+          echo "conclusion=$c" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
       - name: Проверить места
         run: python3 check.py
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SPAM_COUNT: ${{ vars.SPAM_COUNT }}
+          MIN_PRICE: ${{ vars.MIN_PRICE }}
+          PREV_CONCLUSION: ${{ steps.prev.outputs.conclusion }}
           TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.test }}
