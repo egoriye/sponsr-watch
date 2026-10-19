@@ -7,11 +7,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PAGE = os.environ.get('PAGE_URL', 'https://sponsr.ru/marahovsky/')
-SUBSCRIBE = os.environ.get('SUBSCRIBE_URL', 'https://sponsr.ru/marahovsky/subscribe/')
-LEVEL = os.environ.get('LEVEL_NAME', 'Собеседник вечности')
+PAGE = os.environ.get('PAGE_URL') or 'https://sponsr.ru/marahovsky/'
+SUBSCRIBE = os.environ.get('SUBSCRIBE_URL') or 'https://sponsr.ru/marahovsky/subscribe/'
+MIN_PRICE = int(os.environ.get('MIN_PRICE') or 1100)
 SPAM = int(os.environ.get('SPAM_COUNT') or 10)
 TEST = (os.environ.get('TEST') or '').lower() == 'true'
+PREV = (os.environ.get('PREV_CONCLUSION') or '').lower()
 TOKEN = os.environ.get('TG_TOKEN', '')
 CHAT = os.environ.get('TG_CHAT_ID', '')
 UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
@@ -28,34 +29,48 @@ def fetch(url):
         return r.read().decode('utf-8', 'replace')
 
 
-def find_level(node):
+def collect_levels(node, out):
     if isinstance(node, dict):
-        if node.get('level_name') == LEVEL and 'level_subscribers' in node:
-            return node
+        if 'level_name' in node and 'level_price' in node:
+            out.append(node)
+            return out
         node = list(node.values())
     if isinstance(node, list):
         for x in node:
-            found = find_level(x)
-            if found:
-                return found
-    return None
+            collect_levels(x, out)
+    return out
+
+
+def price_of(level):
+    try:
+        return float(level.get('level_price') or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def parse(html):
+    """Возвращает список уровней дороже MIN_PRICE в виде (имя, цена, занято, лимит, свободно)."""
     m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
     if not m:
-        raise RuntimeError('на странице нет __NEXT_DATA__, Sponsr поменял вёрстку или отдал заглушку')
-    level = find_level(json.loads(m.group(1)))
-    if not level:
-        raise RuntimeError(f'уровень «{LEVEL}» не найден на странице')
-    subs, limit = level.get('level_subscribers'), level.get('level_limit')
-    free = level.get('level_status') == 'active' and (limit is None or (subs is not None and subs < limit))
-    return subs, limit, free
+        raise RuntimeError('на странице нет __NEXT_DATA__, Sponsr поменял вёрстку или не пустил')
+    seen, watched = set(), []
+    for lvl in collect_levels(json.loads(m.group(1)), []):
+        key = lvl.get('id') or lvl.get('level_name')
+        if key in seen or price_of(lvl) < MIN_PRICE:
+            continue
+        seen.add(key)
+        subs, limit = lvl.get('level_subscribers'), lvl.get('level_limit')
+        open_ = lvl.get('level_status') == 'active' and lvl.get('level_visible') in (None, 'visible')
+        free = open_ and (limit is None or (subs is not None and subs < limit))
+        watched.append((lvl.get('level_name'), int(price_of(lvl)), subs, limit, free))
+    if not watched:
+        raise RuntimeError(f'не нашёл ни одного уровня от {MIN_PRICE} ₽')
+    return sorted(watched, key=lambda w: w[1])
 
 
 def send(text):
     if not TOKEN or not CHAT:
-        print('TG_TOKEN или TG_CHAT_ID не заданы, сообщение не отправлено:', text)
+        print('TG_TOKEN или TG_CHAT_ID не заданы, сообщение не отправлено.', text)
         return
     data = urllib.parse.urlencode({'chat_id': CHAT, 'text': text,
                                    'disable_web_page_preview': 'true'}).encode()
@@ -71,33 +86,48 @@ def send(text):
             raise
 
 
+def fail(reason):
+    print('Ошибка.', reason)
+    if TEST or PREV != 'failure':
+        send(f'⚠️ Бот sponsr-watch не смог проверить места. {reason}\n'
+             'Пока ошибка повторяется, больше писать не буду.')
+    sys.exit(1)
+
+
 def main():
     html, err = None, None
-    for attempt in range(3):
+    for _ in range(3):
         try:
             html = fetch(PAGE)
             break
         except Exception as e:  # noqa: BLE001
             err = e
             time.sleep(5)
+    if html is None:
+        fail(f'Sponsr не открылся ({err}).')
     try:
-        if html is None:
-            raise RuntimeError(f'Sponsr не открылся: {err}')
-        subs, limit, free = parse(html)
+        watched = parse(html)
     except Exception as e:  # noqa: BLE001
-        if TEST:
-            send(f'Тест не прошёл. {e}')
-        sys.exit(str(e))
+        fail(f'Не разобрал страницу ({e}).')
 
-    print(f'{LEVEL}: занято {subs} из {limit}, свободно={free}')
+    for name, price, subs, limit, free in watched:
+        print(f'{name} ({price} ₽): занято {subs} из {limit}, свободно={free}')
+
     if TEST:
-        send(f'Тест прошёл. «{LEVEL}» сейчас занято {subs} из {limit}. Бот на посту.')
-    if free:
-        text = (f'🚨 Освободилось место на уровне «{LEVEL}»! Занято {subs} из {limit}.\n'
-                f'Подписаться: {SUBSCRIBE}')
-        for i in range(SPAM):
-            send(text if i == 0 else f'🚨 {i + 1}/{SPAM} Место на «{LEVEL}» свободно! {SUBSCRIBE}')
-            time.sleep(1.2)
+        lines = ', '.join(f'{n} {s} из {l}' for n, _, s, l, _ in watched)
+        send(f'Тест прошёл. Сейчас {lines}. Бот на посту.')
+
+    free_levels = [w for w in watched if w[4]]
+    if not free_levels:
+        return
+    for name, price, subs, limit, _ in free_levels:
+        send(f'🚨 Освободилось место на уровне «{name}» за {price} ₽ в месяц, занято {subs} из {limit}.\n'
+             f'Подписаться {SUBSCRIBE}')
+        time.sleep(1.2)
+    names = ', '.join(f'«{w[0]}»' for w in free_levels)
+    for i in range(max(SPAM - len(free_levels), 0)):
+        send(f'🚨 {i + len(free_levels) + 1}/{SPAM} Свободно место на {names}! {SUBSCRIBE}')
+        time.sleep(1.2)
 
 
 if __name__ == '__main__':
