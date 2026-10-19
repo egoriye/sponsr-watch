@@ -2,7 +2,7 @@ name: Место у Мараховского
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       test:
